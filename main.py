@@ -75,11 +75,10 @@ async def main():
             ("20:30"),
             ("21:00"),
             ("21:30"),
-
     ]
 
     now = datetime.now()
-    most_recent_past = None  # the latest time that has already passed
+    most_recent_past = None  
     for time in times:
         scheduled = datetime.strptime(time, "%H:%M").replace(year=now.year, month=now.month, day=now.day)
         if scheduled <= now:
