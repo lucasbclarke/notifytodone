@@ -4,8 +4,27 @@ import os
 import schedule
 import time
 import random
+import threading
+from evdev import InputDevice, categorize, ecodes, list_devices
 from datetime import datetime
 from todoist_api_python.api_async import TodoistAPIAsync
+
+def fetch_task(tasks, times):
+    now = datetime.now()
+    most_recent_past = None
+    for t in times:
+        scheduled = datetime.strptime(t, "%H:%M").replace(year=now.year, month=now.month, day=now.day)
+        if scheduled <= now:
+            if most_recent_past is None or scheduled > most_recent_past:
+                most_recent_past = scheduled
+        else:
+            schedule.every().day.at(t).do(
+                lambda time=t: show_notification("Inbox", random.choice(tasks))
+            )
+    if most_recent_past is not None:
+        show_notification("Inbox", random.choice(tasks))
+
+
 
 def show_notification(title: str, content: str):
     icon = "file://" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "notification.png")
@@ -13,11 +32,56 @@ def show_notification(title: str, content: str):
     n.set_urgency(notify2.URGENCY_NORMAL)
     n.show()
 
+def find_keyboard():
+    candidates = []
+    for path in list_devices():
+        try:
+            dev = InputDevice(path)
+            caps = dev.capabilities(verbose=False)
+            if ecodes.EV_KEY in caps and len(caps[ecodes.EV_KEY]) > 40 :
+                name = dev.name.lower()
+                if "virtual" in name or "ibus" in name or "ydotool" in name:
+                    continue
+                candidates.append(dev)
+        except (PermissionError, OSError):
+            continue
+    if not candidates:
+        raise RuntimeError("No usuable keyboard found")
+
+    for dev in candidates:
+        name = dev.name.lower()
+        if any(x in name for x in ("keyboard", "kbd", "atkbd")):
+            return dev
+
+    return candidates[0]
+
+def _run_listener(tasks, times):
+    device = find_keyboard()
+
+    pressed = set()
+
+    for event in device.read_loop():
+        if event.type != ecodes.EV_KEY:
+            continue
+
+        key = categorize(event)
+        code = key.keycode
+
+        if key.keystate == key.key_down:
+            pressed.add(code)
+
+            if code == "KEY_N" and ("KEY_LEFTMETA" in pressed or "KEY_RIGHTMETA" in pressed):
+                show_notification("Inbox", random.choice(tasks))
+        elif key.keystate == key.key_up:
+            pressed.discard(code)
+
+
+
 async def main():
     notify2.init("My Application")
-    
+
     api = TodoistAPIAsync(os.getenv("TODOIST_API_TOKEN", ""))
-    
+
     inbox = None
     projects_gen = await api.get_projects()
     async for page in projects_gen:
@@ -29,13 +93,13 @@ async def main():
             break
     if not inbox:
         raise SystemExit("Could not find the Todoist Inbox project")
-    
+
     tasks = []
     async for page in await api.get_tasks(project_id=inbox.id):
         for task in page:
             if task.parent_id is None:
                 tasks.append(task.content)
-                
+
     if not tasks:
         print("No tasks found in Inbox")
         return
@@ -76,20 +140,11 @@ async def main():
             ("21:00"),
             ("21:30"),
     ]
+    
+    fetch_task(tasks, times)
 
-    now = datetime.now()
-    most_recent_past = None  
-    for time in times:
-        scheduled = datetime.strptime(time, "%H:%M").replace(year=now.year, month=now.month, day=now.day)
-        if scheduled <= now:
-            if most_recent_past is None or scheduled > most_recent_past:
-                most_recent_past = scheduled
-        else:
-            schedule.every().day.at(time).do(
-                lambda t=time: show_notification("Inbox", random.choice(tasks))
-            )
-    if most_recent_past is not None:
-        show_notification("Inbox", random.choice(tasks))
+    listener_thread = threading.Thread(target=_run_listener(tasks, times), daemon=True)
+    listener_thread.start()
 
     while True:
         schedule.run_pending()
