@@ -4,6 +4,7 @@ import os
 import schedule
 import time
 import random
+import selectors
 import threading
 from evdev import InputDevice, categorize, ecodes, list_devices
 from datetime import datetime
@@ -55,25 +56,35 @@ def find_keyboard():
 
     return candidates[0]
 
+_stop_event = threading.Event()
+
 def _run_listener(tasks, times):
     device = find_keyboard()
+    sel = selectors.DefaultSelector()
+    sel.register(device.fd, selectors.EVENT_READ)
 
     pressed = set()
 
-    for event in device.read_loop():
-        if event.type != ecodes.EV_KEY:
+    while not _stop_event.is_set():
+        events = sel.select(timeout=1)  # 1s timeout so we can check _stop_event
+        if not events:
             continue
+        for event in device.read():
+            if _stop_event.is_set():
+                break
+            if event.type != ecodes.EV_KEY:
+                continue
 
-        key = categorize(event)
-        code = key.keycode
+            key = categorize(event)
+            code = key.keycode
 
-        if key.keystate == key.key_down:
-            pressed.add(code)
+            if key.keystate == key.key_down:
+                pressed.add(code)
 
-            if code == "KEY_N" and ("KEY_LEFTMETA" in pressed or "KEY_RIGHTMETA" in pressed):
-                show_notification("Inbox", random.choice(tasks))
-        elif key.keystate == key.key_up:
-            pressed.discard(code)
+                if code == "KEY_N" and ("KEY_LEFTMETA" in pressed or "KEY_RIGHTMETA" in pressed):
+                    show_notification("Inbox", random.choice(tasks))
+            elif key.keystate == key.key_up:
+                pressed.discard(code)
 
 
 
@@ -143,12 +154,18 @@ async def main():
     
     fetch_task(tasks, times)
 
-    listener_thread = threading.Thread(target=_run_listener(tasks, times), daemon=True)
+    listener_thread = threading.Thread(target=_run_listener, args=(tasks, times), daemon=True)
     listener_thread.start()
 
     while True:
         schedule.run_pending()
         await asyncio.sleep(1)
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        _stop_event.set()
+        time.sleep(0.5)
